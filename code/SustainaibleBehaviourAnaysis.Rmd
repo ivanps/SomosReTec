@@ -1,0 +1,417 @@
+---
+title: "Sustainability Behavior Analysis"
+author: "Educational Research Study"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: cosmo
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+    df_print: paged
+    fig_width: 10
+    fig_height: 6
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = 'center')
+
+# Install and load required packages
+packages <- c("openxlsx", "dplyr", "psych", "labelled", "haven", "DT", 
+              "ggplot2", "gridExtra", "qqplotr", "kableExtra")
+
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, repos = "https://cran.r-project.org")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Set ggplot2 theme
+theme_set(theme_minimal() + 
+          theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+                plot.subtitle = element_text(hjust = 0.5, size = 12),
+                legend.position = "bottom"))
+
+
+compute_ranks <- function(d) {
+# Compute a table of the ranks for the differences of the post-scores minus
+# the pre-scores for an indicator. It is use to compute Modified Wilcoxon test.
+# Input: d = differences of post - pre
+# Output: trks = Data frame with the raw differences d, the absolute differences,
+#                ranks for absolute raw differences, and the ranks for the
+#                ties (average rank)  
+  trks <- data.frame(d=d, dabs = abs(d), rank = 0, rks = 0) %>%
+    arrange(dabs) %>%
+    mutate(rank = seq(1,length(d)))
+  for (c in unique(trks$dabs)) {
+    fval <- trks$dabs == c
+    trks$rks[fval] <- mean(trks$rank[fval])
+  }
+  return(trks)
+}
+
+ModWilcoxonTest <-function(d) {
+# Perform the Modified Wilcoxon Test of Oyeka & Ebuh (2012) 
+# to test pre-post differences of an indicator
+# Input: 
+#   d = vector of differences (Post - Pre)
+# Output: ties, negatives, positives, t.pos, t.neg, t.value, expected.value
+#         variance, z.value, p.value
+  
+  ntrks <- compute_ranks(d)
+  n <- length(d)
+  pin <- sum(d<0)/n
+  pip <- sum(d>0)/n
+  T0 <- sum(ntrks$rks*sign(ntrks$d))
+  ET <- n*(n+1)*(pip-pin)/2
+  VT <- n*(n+1)*(2*n+1)*(pip+pin-(pip-pin)^2)/6
+  modw <- list(ties=sum(d==0), 
+               negatives=sum(d<0),
+               positives=sum(d>0),
+               t.pos=sum(ntrks$rks*(ntrks$d>0)), 
+               t.neg=sum(ntrks$rks*(ntrks$d<0)),
+               t.value=T0,
+               expected.value=ET,
+               variance=VT,
+               z.value=T0/sqrt(VT),
+               p.value=2*pnorm(-abs(T0/sqrt(VT)))
+  )
+  return(modw)
+}
+
+compute_ranks2 <- function(d1, d2) {
+# Compute a table of the ranks for the differences of the post-scores minus
+# the pre-scores for each population. It is use to compute Man-Whitney test.
+# Input: d1 = differences of post - pre in population 1
+#        d2 = differences of post - pre in population 2
+# Output: trks = Data frame with the raw differences d, the absolute differences,
+#                ranks for absolute raw differences, and the ranks for the
+#                ties (average rank) for both population    
+  trks <- rbind(data.frame(sample=1, d=d1, dabs = abs(d1)),
+                data.frame(sample=2, d=d2, dabs = abs(d2))) %>%
+    arrange(dabs) %>%
+    mutate(rks=0, 
+           rank = seq(1,length(d)),
+           ntie = 0)
+  k <- 1
+  for (c in unique(trks$dabs)) {
+    fval <- trks$dabs == c
+    trks$rks[fval] <- mean(trks$rank[fval])
+    if (sum(fval) > 1) {
+      trks$ntie[fval] <- k
+      k <- k + 1
+    }
+  }
+  return(trks)
+}
+
+ManWhitneyTest <- function(d1, d2) {
+  n1 <- length(d1)
+  n2 <- length(d2)
+  trks <- compute_ranks2(d1, d2)
+  tk <- table(trks$ntie)[-1] # Don't include 0 in MW computation
+  mw <- list(
+    u1=sum(trks$rks[trks$sample==1]),
+    u2=sum(trks$rks[trks$sample==2]),
+    u=min(sum(trks$rks[trks$sample==1]),sum(trks$rks[trks$sample==2])),
+    expected.value=n1*(n1+n2+1)/2,
+    s_U=ifelse(length(tk)>0,
+               sqrt((n1*n2/12)*(n1+n2+1-sum(tk^3-tk)/(12*(n1+n2)*(n1+n2-1)))),
+               sqrt(n1*n2*(n1+n2+1)/12))
+    )
+  nl <- length(mw)
+  mw <- append(mw, list(z.value=(mw$u-mw$expected.value)/mw$s_U))
+  mw <- append(mw, list(p.value=2*pnorm(-abs(mw$z.value))))
+  return(mw)
+}
+```
+
+## Introduction
+
+This analysis evaluates the effectiveness of an educational intervention on sustainable behavior among students by comparing control and experimental groups across pre-test and post-test measurements. The study examines four key sustainability dimensions: proecological behavior (environmental conservation actions), frugality (resource-conscious consumption), equity (fairness and social justice awareness), and altruism (concern for others' well-being). Using non-parametric statistical methods, we first verify that the control and experimental groups were equivalent at baseline through Mann-Whitney tests. Subsequently, we apply modified Wilcoxon signed-rank tests to assess whether significant behavioral changes occurred within each group after the intervention period. This comprehensive approach allows us to determine whether the educational intervention produced measurable improvements in sustainable behaviors in the experimental group while accounting for any natural changes that may have occurred in the control group over the same time period.
+
+## Survey data
+
+```{r, echo=FALSE}
+dfenc <- read.xlsx(xlsxFile = "../data/SustainableBehaviorClean.xlsx", colNames=TRUE)
+# Name student column
+dfenc$student <- dfenc$Username
+# Read etapa as factor
+dfenc$etapa <- as.factor(dfenc$Momento)
+# Read grupo as factor
+dfenc$grupo <- as.factor(dfenc$Tipo.de.grupo)
+
+# Display first few rows with nice formatting
+dfenc %>% 
+  head(10) %>%
+  kable(caption = "Sample of Survey Data") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE,
+                font_size = 12) %>%
+  scroll_box(width = "100%")
+```
+
+## Descriptive analysis
+
+The following table shows the descriptive statistics for each factor by group (Control and Experimental) and stage (Pre and Post).
+```{r, echo=FALSE}
+options(width=200)
+allfact <- select(dfenc, student, etapa, grupo, proecologica:altruismo)
+describeBy(dplyr::select(allfact, proecologica:altruismo), list(allfact$etapa, allfact$grupo))
+```
+
+## Research Hypothesis
+
+We first test the null hypothesis that the pre and post scores are the same for each factor by using the Mann-Whitney test. Then we use a modified Wilcoxon test to test the null hypothesis that the post scores are the same for the control group, but there are significant differences for the experimental group.
+
+### Pre-Control vs Pre-Experimental
+
+We compare the pre-control and pre-experimental groups.
+```{r, echo=FALSE}
+fallfact <- dplyr::filter(allfact, etapa=="Pre")
+stkfact <- data.frame()
+namefacts <- c("Proecologica", "Frugalidad", "Equidad", "Altruismo")
+facts <- c("proecologica", "frugalidad", "equidad", "altruismo")
+for (i in 1:4) {
+  dftmp <- data.frame(fact=rep(namefacts[i],nrow(fallfact)), 
+                      grupo = fallfact$grupo,
+                      value = fallfact[,facts[i]])
+  stkfact <- rbind(stkfact, dftmp)
+}
+ggplot(stkfact, aes(y=factor(fact, level=namefacts[9:1]), x=value, fill=grupo)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Pre-Test Comparison: Control vs Experimental Groups",
+       x = "Score",
+       fill = "Group") +
+  theme(axis.title.y = element_blank()) +
+  scale_fill_manual(values = c("#3498db", "#e74c3c"),
+                    labels = c("Pre-Control", "Pre-Experimental"))
+```
+
+We use the Man Whitney test to prove that there is not difference between the control and experimental groups. The test statistics is
+$$
+Z = \frac{U-E(U)}{\sqrt{Var(U)}}
+$$
+where
+$$
+U = \min\left\{ n_1n_2 + \frac{n_1(n_1+1)}{2} -R_1, n_1n_2 + \frac{n_2(n_2+1)}{2} -R_2\right\},
+$$
+$$
+E(U) = \frac{n_1(n_1+n_2+1)}{2},
+$$
+$$
+\sigma_U = \sqrt{\frac{n_1n_2}{12} \left(n_1+n_2+1-\frac{\sum_{k=1}^K(t_k^3-t_k)}{(n_1+n_2)(n_1+n_2+1)}\right)}.
+$$
+$R_1$ and $R_2$ are the sum of the ranks in each group after pooling both samples, and $t_k$ is the number of ties values in the $i^{th}$ set of ties.
+
+The following table shows the result for each factor.
+```{r, echo=FALSE}
+NF <- 4
+namefacts <- c("Proecologica", "Frugalidad", "Equidad", "Altruismo")
+tablemw <- data.frame(U1=rep(0,NF), U2=rep(0,NF), U=rep(0,NF), EU=rep(0,NF), s_U=rep(0,NF), Z=rep(0,NF), p.value=rep(0,NF))
+rownames(tablemw) <- namefacts
+
+for (i in 1:NF) {
+  d1 <- filter(stkfact, fact==namefacts[i] & grupo=="Control")$value
+  d2 <- filter(stkfact, fact==namefacts[i] & grupo=="Experimental")$value
+  mw <- ManWhitneyTest(d1, d2)
+  tablemw[i,1] <- mw$u1
+  tablemw[i,2] <- mw$u2
+  tablemw[i,3] <- mw$u
+  tablemw[i,4] <- mw$expected.value 
+  tablemw[i,5] <- mw$s_U
+  tablemw[i,6] <- mw$z.value
+  tablemw[i,7] <- mw$p.value
+}
+
+#write.csv(fallfact, "factors.csv")
+tablemw %>%
+  kable(caption = "Mann-Whitney Test Results: Pre-Control vs Pre-Experimental",
+        digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, background = "#3498db", color = "white")
+```
+
+### Pre vs Post groups
+
+We use the modified algorithm due to Cyprian, Oyeda and Ebuh (2012). We denote by $d_i$ the difference of the post-score of the i-th student from his pre-score in the particular indicator. As the usual Wilcoxon's algorithm, the data is sorted according to $|d_i|$ and then its rank is assigned. The ties are resolved with the usual average. Then the sum of ranks is given by 
+$$
+T = \sum_{i=1}^n \hbox{rank}(|d_i|)Z_i,
+$$
+where $Z_i$ is defined by $P(Z_i =1)=\pi^+$, $P(Z_i=0)=\pi^0$ and $P(Z_i=-1) = \pi^-$.  Furthermore,
+$$
+E(T) = \frac{n(n+1)}{2}(\pi^+ - \pi^-),
+$$
+$$
+Var(T) = \frac{n(n+1)(2n+1)}{6}(\pi^+ + \pi^- (\pi^+ - \pi^-)^2)
+$$
+and the test statistics is
+$$
+Z = \frac{T}{\sqrt{Var(T)}}
+$$
+
+We compare the pre and post for the control group with a box plot for each factor.
+```{r, echo=FALSE}
+fallfact <- filter(allfact, grupo=="Control")
+stkfact <- data.frame()
+namefacts <- c("Proecologica", "Frugalidad", "Equidad", "Altruismo")
+facts <- c("proecologica", "frugalidad", "equidad", "altruismo")
+for (i in 1:4) {
+  dftmp <- data.frame(student = fallfact$student,
+                      fact=rep(namefacts[i],nrow(fallfact)), 
+                      etapa = fallfact[,"etapa"],
+                      value = fallfact[,facts[i]],
+                      cambio = 0)
+  stkfact <- rbind(stkfact, dftmp)
+}
+ggplot(stkfact, aes(y=factor(fact, level=namefacts[9:1]), x=value, fill=etapa)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Control Group: Pre-Test vs Post-Test Comparison",
+       x = "Score",
+       fill = "Stage") +
+  theme(axis.title.y = element_blank()) +
+  scale_fill_manual(values = c("#3498db", "#2ecc71"),
+                    labels = c("Pre-Control", "Post-Control"))
+```
+
+For the control group we got the following table.
+```{r, echo=FALSE}
+w1allfact <- filter(allfact, grupo=="Control" & etapa=="Pre") %>% arrange(student)
+w2allfact <- filter(allfact, grupo=="Control" & etapa=="Post") %>% arrange(student)
+study_stds1 <- w1allfact$student %in% w2allfact$student
+w1allfact <- w1allfact[study_stds1,]
+study_stds2 <- w2allfact$student %in% w1allfact$student
+w2allfact <- w2allfact[study_stds2,]
+if (sum(w1allfact$student != w2allfact$student) > 0) {
+  stop("Students do not match in control group")
+}
+facts <- c("proecologica", "frugalidad", "equidad", "altruismo")
+wallfact <- w2allfact[facts] - w1allfact[facts]
+NF <- 4
+wtallfact <- data.frame(Ties=rep(0,NF), Negatives=rep(0,NF), Positives=rep(0,NF), T.Neg=rep(0,NF), T.Pos=rep(0,NF), T=rep(0,NF), ET=rep(0,NF), Z=rep(0,NF), p.value=rep(0,NF))
+rownames(wtallfact) <- c("Proecologica", "Frugalidad", "Equidad", "Altruismo")
+ 
+for (i in 1:NF) {
+  d <- wallfact[,i]
+  modw <- ModWilcoxonTest(d)
+  wtallfact[i,1] <- modw$ties
+  wtallfact[i,2] <- modw$negatives
+  wtallfact[i,3] <- modw$positives
+  wtallfact[i,4] <- modw$t.neg
+  wtallfact[i,5] <- modw$t.pos
+  wtallfact[i,6] <- modw$t.value
+  wtallfact[i,7] <- modw$expected.value
+  wtallfact[i,8] <- modw$z.value
+  wtallfact[i,9] <- modw$p.value
+}
+
+wtallfact %>%
+  kable(caption = "Modified Wilcoxon Test Results: Control Group (Pre vs Post)",
+        digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, background = "#3498db", color = "white")
+```
+
+Now we applied the modified Wilcoxon test to the experimental group data.
+```{r, echo=FALSE}
+fallfact <- filter(allfact, grupo=="Experimental")
+stkfact <- data.frame()
+facts <- c("proecologica", "frugalidad", "equidad", "altruismo")
+namefacts <- c("Proecologica", "Frugalidad", "Equidad", "Altruismo")
+for (i in 1:length(namefacts)) {
+  dftmp <- data.frame(student = fallfact$student,
+                      fact=rep(namefacts[i],nrow(fallfact)), 
+                      etapa = fallfact[,"etapa"],
+                      value = fallfact[,facts[i]],
+                      cambio = 0)
+  stkfact <- rbind(stkfact, dftmp)
+}
+ggplot(stkfact, aes(y=factor(fact, level=namefacts[9:1]), x=value, fill=etapa)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Experimental Group: Pre-Test vs Post-Test Comparison",
+       x = "Score",
+       fill = "Stage") +
+  theme(axis.title.y = element_blank()) +
+  scale_fill_manual(values = c("#e74c3c", "#f39c12"),
+                    labels = c("Pre-Experimental", "Post-Experimental"))
+```
+
+```{r, echo=FALSE}
+w1allfact <- filter(allfact, grupo=="Experimental" & etapa=="Pre") %>% arrange(student)
+w2allfact <- filter(allfact, grupo=="Experimental" & etapa=="Post") %>% arrange(student)
+study_stds1 <- w1allfact$student %in% w2allfact$student
+w1allfact <- w1allfact[study_stds1,]
+study_stds2 <- w2allfact$student %in% w1allfact$student
+w2allfact <- w2allfact[study_stds2,]
+if (sum(w1allfact$student != w2allfact$student) > 0) {
+  stop("Students do not match in control group")
+}
+facts <- c("proecologica", "frugalidad", "equidad", "altruismo")
+wallfact <- w2allfact[facts] - w1allfact[facts]
+NF <- length(facts)
+wtallfact <- data.frame(Ties=rep(0,NF), Negatives=rep(0,NF), Positives=rep(0,NF), T.Neg=rep(0,NF), T.Pos=rep(0,NF), T=rep(0,NF), ET=rep(0,NF), Z=rep(0,NF), p.value=rep(0,NF))
+rownames(wtallfact) <- c("Proecologica", "Frugalidad", "Equidad", "Altruismo")
+
+for (i in 1:NF) {
+  d <- wallfact[,i]
+  modw <- ModWilcoxonTest(d)
+  wtallfact[i,1] <- modw$ties
+  wtallfact[i,2] <- modw$negatives
+  wtallfact[i,3] <- modw$positives
+  wtallfact[i,4] <- modw$t.neg
+  wtallfact[i,5] <- modw$t.pos
+  wtallfact[i,6] <- modw$t.value
+  wtallfact[i,7] <- modw$expected.value
+  wtallfact[i,8] <- modw$z.value
+  wtallfact[i,9] <- modw$p.value
+}
+
+wtallfact %>%
+  kable(caption = "Modified Wilcoxon Test Results: Experimental Group (Pre vs Post)",
+        digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, background = "#e74c3c", color = "white")
+```
+
+## Summary of Results {.tabset}
+
+### Key Findings
+
+```{r echo=FALSE}
+data.frame(
+  Test = c("Pre-Control vs Pre-Experimental", 
+           "Control Group (Pre vs Post)",
+           "Experimental Group (Pre vs Post)"),
+  Purpose = c("Verify groups are equivalent at baseline",
+              "Check for changes without intervention",
+              "Assess intervention effectiveness"),
+  Method = c("Mann-Whitney Test", 
+             "Modified Wilcoxon Test",
+             "Modified Wilcoxon Test")
+) %>%
+  kable(caption = "Statistical Analysis Overview") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#34495e", color = "white")
+```
+
+### Interpretation Guide
+
+- **p-value < 0.05**: Statistically significant difference
+- **p-value ≥ 0.05**: No significant difference
+
+## References
+
+Minitab LLC. (2025). Métodos y fórmulas para la Prueba de Mann-Whitney. Minitab Help & How-to (Spanish). Retrieved from https://support.minitab.com/es-mx/minitab/help-and-how-to/statistics/nonparametrics/how-to/mann-whitney-test/methods-and-formulas/methods-and-formulas/
+
+Oyeka, I. C. A., & Ebuh, G. U. (2012). Modified Wilcoxon signed-rank test. Open Journal of Statistics, 2(2), 172-176.
